@@ -1,127 +1,15 @@
-<!DOCTYPE html>
-<html><head><meta charset="utf-8"><link rel="icon" href="data:,"><title>i4NS Radar MVP — forecast check</title>
-<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
-<style>body{font-family:sans-serif;margin:16px;max-width:1300px} #log{background:#f4f4f4;padding:8px;max-height:260px;overflow:auto;white-space:pre-wrap;font-size:13px} #slider{width:500px;vertical-align:middle}</style>
-</head><body>
-<h2>i4NS Radar MVP — forecast check proof of concept</h2>
-<p>Gray = original forecast with allowed range. Black dots = real buoy readings (NOAA buoy 44009). Red line = flag (forecast confirmed wrong). Blue = neural net's updated prediction.</p>
-<p>
-<button id="prev">Prev day</button>
-<input type="date" id="date" value="2024-12-04">
-<button id="next">Next day</button>
-</p>
-<p>
-<button id="play">Play</button> <button id="step">Step</button>
-<input type="range" id="slider" min="0" max="0" value="0">
-<b id="hourlabel"></b>
-</p>
-<p id="status"></p>
-<div id="chart"></div>
-<h3>Event log</h3>
-<div id="log"></div>
-<script>
-const VARS=[["wind","Wind (mph)"],["temp","Air temp (°C)"],["rh","Humidity (%)"],["sea","Sea temp (°C)"],["pres","Pressure (hPa)"]];
-const NAMES={wind:"wind",temp:"air temp",rh:"humidity",sea:"sea temp",pres:"pressure"};
-let D=null, timer=null;
-const $=id=>document.getElementById(id);
-const hh=s=>s.slice(11,16);
-const clip=(v,x)=>(v==="wind"||v==="rh")?Math.max(0,x):x;
-const f1=x=>(Math.round(x*10)/10).toFixed(1);
-const unit=v=>D.units[v];
-
-async function load(){
-  stop();
-  const r=await fetch("/api/day?date="+$("date").value);
-  if(!r.ok){D=null;$("status").textContent="No data for this date ("+r.status+").";Plotly.purge("chart");$("log").textContent="";return;}
-  D=await r.json();
-  const n=D.hours.length;
-  $("slider").max=n-1; $("slider").value=n-1;
-  $("status").innerHTML=D.flag?("<b>Flag at "+hh(D.flag.time)+"</b> triggered by: "+D.flag.variables.map(v=>NAMES[v]).join(", ")):"<b>No flag — forecast stayed within range all day</b>";
-  render(true);
-}
-
-function flagIdx(){return D.flag?D.hours.findIndex(h=>h.hour===D.flag.time):-1;}
-
-function render(first){
-  if(!D)return;
-  const H=D.hours, n=H.length, i=+$("slider").value, fi=flagIdx();
-  const t=H.map(h=>h.hour);
-  $("hourlabel").textContent=hh(t[i])+(i===n-1?" (end of day)":"");
-  const traces=[], shapes=[], ann=[], layout={height:5*270+110,margin:{l:70,r:20,t:40,b:30},uirevision:D.date+"x",
-    legend:{orientation:"h",y:1.03,x:0}};
-  const gap=0.07, h=(1-4*gap)/5;
-  const path=(D.flag&&i>=fi)?D.nn_paths[t[i]]:null;
-  VARS.forEach(([v,title],k)=>{
-    const ax=k+1, xa="x"+(k?ax:""), ya="y"+(k?ax:"");
-    const dom=[1-(k+1)*h-k*gap,1-k*(h+gap)];
-    const lo=H.map(x=>clip(v,x.vars[v].lo)), hi=H.map(x=>x.vars[v].hi), fc=H.map(x=>x.vars[v].forecast);
-    const ar=H.map((x,j)=>j<=i?x.vars[v].actual:null);
-    const s=k===0;
-    traces.push({x:t,y:lo,xaxis:xa,yaxis:ya,mode:"lines",line:{width:0},showlegend:false,hoverinfo:"skip"});
-    traces.push({x:t,y:hi,xaxis:xa,yaxis:ya,mode:"lines",line:{width:0},fill:"tonexty",fillcolor:"rgba(160,160,160,0.25)",name:"Allowed range",showlegend:s,hoverinfo:"skip"});
-    traces.push({x:t,y:fc,xaxis:xa,yaxis:ya,mode:"lines",line:{color:"gray"},name:"Forecast",showlegend:s});
-    traces.push({x:t,y:ar,xaxis:xa,yaxis:ya,mode:"markers",marker:{color:"black",size:6},name:"Actual (buoy)",showlegend:s});
-    let nx=[],ny=[];
-    if(path){const a=H[i].vars[v].actual; if(a!=null){nx.push(t[i]);ny.push(a);}
-      path.hours.forEach((hr,q)=>{if(hr<=t[n-1]){nx.push(hr);ny.push(path.vars[v][q]);}});}
-    if(D.flag&&i===n-1){nx=[];ny=[];H.forEach((x,j)=>{if(j>fi&&x.vars[v].nn_updated!=null){nx.push(t[j]);ny.push(x.vars[v].nn_updated);}});}
-    traces.push({x:nx,y:ny,xaxis:xa,yaxis:ya,mode:"lines+markers",line:{color:"blue"},marker:{size:5},name:"Neural net update",showlegend:s});
-    layout["xaxis"+(k?ax:"")]={domain:[0,1],anchor:ya.replace("y","y"),type:"date",tickformat:"%H:%M",dtick:3600000,
-      range:[t[0].replace(/T.*/,"T07:30"),t[n-1].replace(/T.*/,"T20:30")],title:{text:"Local time"},matches:k?"x":undefined,
-      rangeslider:k===4?{visible:true,thickness:0.04}:{visible:false}};
-    layout["yaxis"+(k?ax:"")]={domain:dom,anchor:xa,title:{text:title},zeroline:false};
-    if(D.flag&&i>=fi){
-      shapes.push({type:"line",xref:xa,yref:ya+" domain",x0:t[fi],x1:t[fi],y0:0,y1:1,line:{color:"red",dash:"dash",width:2}});
-      ann.push({xref:xa,yref:ya+" domain",x:t[fi],y:1,yanchor:"bottom",text:"FLAG"+(k===0?" ("+D.flag.variables.map(q=>NAMES[q]).join(", ")+")":""),showarrow:false,font:{color:"red"}});
-    }
-  });
-  layout.shapes=shapes; layout.annotations=ann;
-  // fixed y ranges so they don't jump while sliding
-  VARS.forEach(([v],k)=>{
-    let vals=[];
-    H.forEach(x=>{const o=x.vars[v];vals.push(clip(v,o.lo),o.hi,o.forecast);if(o.actual!=null)vals.push(o.actual);});
-    Object.values(D.nn_paths).forEach(p=>p.vars[v].forEach(y=>{if(y!=null)vals.push(y);}));
-    const mn=Math.min(...vals),mx=Math.max(...vals),pad=(mx-mn)*0.05||1;
-    layout["yaxis"+(k?k+1:"")].range=[mn-pad,mx+pad];
-  });
-  Plotly.react("chart",traces,layout,{responsive:true});
-  renderLog(i);
-}
-
-function renderLog(i){
-  const H=D.hours, fi=flagIdx(), L=[];
-  L.push("08:00 forecast issued for 08:00–20:00");
-  const streak={};
-  for(let j=0;j<=i;j++){
-    const x=H[j], tm=hh(x.hour);
-    VARS.forEach(([v])=>{
-      const o=x.vars[v];
-      if(o.in_bounds===false){
-        streak[v]=(streak[v]||0)+1;
-        L.push(tm+" "+NAMES[v]+" "+f1(o.actual)+" "+unit(v)+" outside allowed range (forecast "+f1(o.forecast)+", allowed "+f1(clip(v,o.lo)).replace("-","−")+"–"+f1(o.hi)+")");
-        if(streak[v]===2&&j===fi&&D.flag.variables.includes(v))
-          L.push(tm+" "+NAMES[v]+" out of range 2nd hour in a row → FLAG: forecast confirmed wrong");
-      } else streak[v]=0;
-    });
-    if(D.flag&&j>=fi&&D.nn_paths[x.hour]){
-      const p=D.nn_paths[x.hour];
-      const parts=[];
-      D.flag.variables.forEach(v=>p.hours.forEach((hr,q)=>{if(hr<=H[H.length-1].hour&&q<3)parts.push(NAMES[v]+" "+hh(hr)+" "+f1(p.vars[v][q])+" "+unit(v));}));
-      if(parts.length)L.push(tm+" neural net updates: "+parts.join(", ")+(p.hours.length>3?" …":""));
-    }
-  }
-  if(!D.flag&&i===H.length-1)L.push("No flag — forecast stayed within range all day");
-  $("log").textContent=L.join("\n");
-  $("log").scrollTop=1e6;
-}
-
-function stop(){if(timer){clearInterval(timer);timer=null;}$("play").textContent="Play";}
-function advance(){const s=$("slider");if(+s.value>=+s.max){stop();return false;}s.value=+s.value+1;render();return true;}
-$("slider").oninput=()=>render();
-$("step").onclick=()=>{stop();const s=$("slider");if(+s.value>=+s.max)s.value=0;advance();if(+s.value===0)render();};
-$("play").onclick=()=>{if(timer){stop();return;}const s=$("slider");if(+s.value>=+s.max)s.value=0;render();$("play").textContent="Pause";timer=setInterval(advance,1000);};
-function shift(d){const e=new Date($("date").value+"T12:00:00Z");e.setUTCDate(e.getUTCDate()+d);$("date").value=e.toISOString().slice(0,10);load();}
-$("prev").onclick=()=>shift(-1);$("next").onclick=()=>shift(1);
-$("date").onchange=load;
-load();
-</script></body></html>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b1320" />
+    <meta name="description" content="Replay NOAA buoy observations and explore short-term environmental forecast updates." />
+    <link rel="icon" href="data:," />
+    <title>Environmental Forecast Monitor | i4NS</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
